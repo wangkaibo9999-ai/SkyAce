@@ -1,0 +1,636 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <title>SkyAce: 3D Low Poly Dogfight</title>
+    <style>
+        /* UI 样式设计：简洁、现代 */
+        @import url('https://fonts.googleapis.com/css?family=Play:400,700');
+
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: linear-gradient(to bottom, #e4e0ba 0%, #f7d9aa 100%);
+            font-family: 'Play', sans-serif;
+            user-select: none;
+        }
+
+        #world { position: absolute; width: 100%; height: 100%; overflow: hidden; }
+
+        /* 抬头显示器 (HUD) */
+        #ui-layer {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none;
+            display: flex; flex-direction: column; justify-content: space-between;
+            padding: 20px; box-sizing: border-box;
+        }
+
+        .hud-header { display: flex; justify-content: space-between; align-items: flex-start; }
+
+        .stat-box { text-align: center; }
+        .label { color: #d35400; font-size: 14px; font-weight: bold; letter-spacing: 1px; margin-bottom: 5px; text-transform: uppercase; }
+        
+        /* 血条设计 */
+        .health-wrap {
+            width: 200px; height: 15px; background: rgba(255,255,255,0.3);
+            border: 2px solid #fff; border-radius: 10px; overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .health-fill { height: 100%; width: 100%; transition: width 0.2s cubic-bezier(0.25, 0.46, 0.45, 0.94); }
+        #p-hp { background: #2ecc71; }
+        #e-hp { background: #e74c3c; }
+
+        #score { font-size: 40px; color: #6d4638; font-weight: 800; text-shadow: 2px 2px 0px rgba(255,255,255,0.5); }
+
+        /* 游戏结束覆盖层 */
+        #game-over {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(247, 217, 170, 0.85); backdrop-filter: blur(5px);
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            opacity: 0; pointer-events: none; transition: opacity 0.5s;
+            z-index: 10;
+        }
+        #game-over.active { opacity: 1; pointer-events: auto; }
+        
+        h1 { font-size: 80px; color: #e74c3c; margin: 0; text-transform: uppercase; text-shadow: 4px 4px 0 #fff; }
+        p { font-size: 20px; color: #6d4638; margin-bottom: 30px; letter-spacing: 2px; }
+        
+        button {
+            padding: 15px 50px; font-size: 24px; font-family: 'Play', sans-serif;
+            background: #fff; color: #e74c3c; border: none; border-radius: 50px;
+            cursor: pointer; font-weight: bold; text-transform: uppercase;
+            box-shadow: 0 10px 20px rgba(231, 76, 60, 0.3);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        button:hover { transform: translateY(-3px); box-shadow: 0 15px 25px rgba(231, 76, 60, 0.4); }
+        button:active { transform: translateY(2px); }
+
+        #instructions {
+            text-align: center; color: rgba(109, 70, 56, 0.6); font-size: 14px; letter-spacing: 3px;
+            position: absolute; bottom: 20px; width: 100%;
+        }
+    </style>
+    <!-- 引入 Three.js 引擎 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="world"></div>
+
+    <div id="ui-layer">
+        <div class="hud-header">
+            <div class="stat-box">
+                <div class="label">Player</div>
+                <div class="health-wrap"><div id="p-hp" class="health-fill"></div></div>
+            </div>
+            <div id="score">0</div>
+            <div class="stat-box">
+                <div class="label">Enemy</div>
+                <div class="health-wrap"><div id="e-hp" class="health-fill"></div></div>
+            </div>
+        </div>
+        <div id="instructions">鼠标控制飞行 • 左键射击</div>
+    </div>
+
+    <div id="game-over">
+        <h1 id="end-title">Game Over</h1>
+        <p id="end-msg">Mission Failed</p>
+        <button onclick="resetGame()">Re-Engage</button>
+    </div>
+
+<script>
+    /**
+     * 游戏配色方案
+     * 采用 Teal & Orange 电影感配色，低饱和度营造高级感
+     */
+    const Colors = {
+        red: 0xf25346,
+        white: 0xd8d0d1,
+        brown: 0x59332e,
+        pink: 0xF5986E,
+        brownDark: 0x23190f,
+        blue: 0x68c3c0,
+        enemy: 0x2c3e50, // 深蓝灰
+        bullet: 0xffd700  // 金色
+    };
+
+    // 全局变量
+    let scene, camera, renderer;
+    let sea, sky, player, enemy;
+    let mousePos = { x: 0, y: 0 };
+    let gameActive = true;
+    let score = 0;
+    
+    // 对象池
+    let bullets = [];
+    let particles = [];
+
+    // 初始化入口
+    function init() {
+        createScene();
+        createLights();
+        createPlane();
+        createEnemy();
+        createSea();
+        createSky();
+
+        // 事件监听
+        document.addEventListener('mousemove', handleMouseMove, false);
+        document.addEventListener('mousedown', handleShoot, false);
+        window.addEventListener('resize', handleWindowResize, false);
+
+        // 开始渲染循环
+        loop();
+    }
+
+    // --- 场景搭建 ---
+    function createScene() {
+        scene = new THREE.Scene();
+        // 线性雾效，平滑过渡天空与地平线
+        scene.fog = new THREE.Fog(0xf7d9aa, 100, 950);
+
+        camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 10000);
+        camera.position.set(0, 100, 200);
+
+        renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true; // 开启阴影
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap; // 柔和阴影
+        
+        document.getElementById('world').appendChild(renderer.domElement);
+    }
+
+    function createLights() {
+        // 半球光：模拟天空光（上方）和地面反射光（下方）
+        const hemisphereLight = new THREE.HemisphereLight(0xaaaaaa, 0x000000, .9);
+        
+        // 平行光：模拟太阳
+        const shadowLight = new THREE.DirectionalLight(0xffffff, .9);
+        shadowLight.position.set(150, 350, 350);
+        shadowLight.castShadow = true;
+        
+        // 优化阴影范围和分辨率
+        shadowLight.shadow.camera.left = -400;
+        shadowLight.shadow.camera.right = 400;
+        shadowLight.shadow.camera.top = 400;
+        shadowLight.shadow.camera.bottom = -400;
+        shadowLight.shadow.camera.near = 1;
+        shadowLight.shadow.camera.far = 1000;
+        shadowLight.shadow.mapSize.width = 2048;
+        shadowLight.shadow.mapSize.height = 2048;
+
+        scene.add(hemisphereLight);
+        scene.add(shadowLight);
+        
+        // 环境光补光
+        scene.add(new THREE.AmbientLight(0xdc8874, .5));
+    }
+
+    // --- 游戏实体类 ---
+
+    // 1. 大海 (动态波浪)
+    const Sea = function() {
+        // 创建一个巨大的圆柱体作为海面，横放
+        const geom = new THREE.CylinderGeometry(600, 600, 800, 40, 10);
+        geom.applyMatrix4(new THREE.Matrix4().makeRotationX(-Math.PI / 2));
+
+        // 获取顶点数据用于波浪动画
+        const positionAttribute = geom.getAttribute('position');
+        const waves = [];
+        
+        for (let i = 0; i < positionAttribute.count; i++) {
+            const y = positionAttribute.getY(i);
+            const x = positionAttribute.getX(i);
+            const z = positionAttribute.getZ(i);
+            
+            waves.push({
+                y: y, x: x, z: z,
+                ang: Math.random() * Math.PI * 2,
+                amp: 5 + Math.random() * 15, // 波浪幅度
+                speed: 0.016 + Math.random() * 0.032 // 波浪速度
+            });
+        }
+        
+        this.mesh = new THREE.Mesh(geom, new THREE.MeshPhongMaterial({
+            color: Colors.blue,
+            transparent: true,
+            opacity: 0.8,
+            flatShading: true, // 低多边形的关键：平面着色
+        }));
+        
+        this.mesh.receiveShadow = true;
+        this.waves = waves;
+        this.geom = geom;
+    }
+
+    Sea.prototype.moveWaves = function() {
+        const positions = this.geom.attributes.position.array;
+        
+        for(let i=0; i<this.waves.length; i++){
+            const v = this.waves[i];
+            // 更新波浪角度
+            v.ang += v.speed;
+            // 正弦波运动
+            const waveY = v.y + Math.cos(v.ang) * v.amp;
+            const waveX = v.x + Math.sin(v.ang) * v.amp;
+            
+            // 更新几何体顶点
+            positions[i*3] = waveX; 
+            positions[i*3 + 1] = waveY;
+        }
+        
+        this.geom.attributes.position.needsUpdate = true;
+        this.mesh.rotation.z += .005; // 海面整体旋转，模拟飞行速度
+    }
+
+    // 2. 云朵与天空
+    const Cloud = function() {
+        this.mesh = new THREE.Object3D();
+        // 云朵由多个立方体随机组合而成
+        const geom = new THREE.BoxGeometry(20, 20, 20);
+        const mat = new THREE.MeshPhongMaterial({ color: Colors.white });
+        
+        const nBlocs = 3 + Math.floor(Math.random() * 3);
+        for (let i = 0; i < nBlocs; i++) {
+            const m = new THREE.Mesh(geom, mat);
+            m.position.x = i * 15;
+            m.position.y = Math.random() * 10;
+            m.position.z = Math.random() * 10;
+            m.rotation.z = Math.random() * Math.PI * 2;
+            m.rotation.y = Math.random() * Math.PI * 2;
+            const s = .1 + Math.random() * .9;
+            m.scale.set(s, s, s);
+            m.castShadow = true;
+            m.receiveShadow = true;
+            this.mesh.add(m);
+        }
+    }
+
+    const Sky = function() {
+        this.mesh = new THREE.Object3D();
+        this.nClouds = 20;
+        const stepAngle = Math.PI * 2 / this.nClouds;
+        
+        for(let i=0; i<this.nClouds; i++){
+            const c = new Cloud();
+            const a = stepAngle * i; // 极坐标角度
+            const h = 750 + Math.random() * 200; // 距离中心的高度
+            
+            c.mesh.position.y = Math.sin(a) * h;
+            c.mesh.position.x = Math.cos(a) * h;
+            c.mesh.position.z = -400 - Math.random() * 400; // 深度
+            c.mesh.rotation.z = a + Math.PI / 2;
+            
+            const s = 1 + Math.random() * 2;
+            c.mesh.scale.set(s,s,s);
+            this.mesh.add(c.mesh);
+        }
+    }
+
+    // 3. 飞机 (通用类)
+    const Airplane = function(color, type) {
+        this.mesh = new THREE.Object3D();
+        this.hp = 100;
+        this.type = type; // 'player' or 'enemy'
+
+        // 机身
+        const geomCockpit = new THREE.BoxGeometry(80, 50, 50, 1, 1, 1);
+        const matCockpit = new THREE.MeshPhongMaterial({ color: color, flatShading: true });
+        
+        // 简单的顶点操作让机身有点造型
+        const positions = geomCockpit.attributes.position.array;
+        // 注意：这里为了代码简洁不做复杂的顶点缩放，BoxGeometry自带的Low Poly风格已经足够好看
+
+        const cockpit = new THREE.Mesh(geomCockpit, matCockpit);
+        cockpit.castShadow = true;
+        cockpit.receiveShadow = true;
+        this.mesh.add(cockpit);
+
+        // 引擎
+        const geomEngine = new THREE.BoxGeometry(20, 50, 50, 1, 1, 1);
+        const matEngine = new THREE.MeshPhongMaterial({ color: Colors.white, flatShading: true });
+        const engine = new THREE.Mesh(geomEngine, matEngine);
+        engine.position.x = 40;
+        engine.castShadow = true;
+        engine.receiveShadow = true;
+        this.mesh.add(engine);
+
+        // 机尾
+        const geomTail = new THREE.BoxGeometry(15, 20, 5, 1, 1, 1);
+        const matTail = new THREE.MeshPhongMaterial({ color: Colors.red, flatShading: true });
+        const tail = new THREE.Mesh(geomTail, matTail);
+        tail.position.set(-35, 25, 0);
+        tail.castShadow = true;
+        tail.receiveShadow = true;
+        this.mesh.add(tail);
+
+        // 机翼
+        const geomWing = new THREE.BoxGeometry(40, 8, 150, 1, 1, 1);
+        const matWing = new THREE.MeshPhongMaterial({ color: Colors.red, flatShading: true });
+        const wing = new THREE.Mesh(geomWing, matWing);
+        wing.castShadow = true;
+        wing.receiveShadow = true;
+        this.mesh.add(wing);
+
+        // 螺旋桨
+        const geomPropeller = new THREE.BoxGeometry(20, 10, 10, 1, 1, 1);
+        const matPropeller = new THREE.MeshPhongMaterial({ color: Colors.brown, flatShading: true });
+        this.propeller = new THREE.Mesh(geomPropeller, matPropeller);
+        this.propeller.castShadow = true;
+        this.propeller.receiveShadow = true;
+
+        // 桨叶
+        const geomBlade = new THREE.BoxGeometry(1, 100, 20, 1, 1, 1);
+        const matBlade = new THREE.MeshPhongMaterial({ color: Colors.brownDark, flatShading: true });
+        const blade = new THREE.Mesh(geomBlade, matBlade);
+        blade.position.set(8, 0, 0);
+        blade.castShadow = true;
+        blade.receiveShadow = true;
+        this.propeller.add(blade);
+        this.propeller.position.set(50, 0, 0);
+        this.mesh.add(this.propeller);
+    };
+
+    // --- 实例化函数 ---
+
+    function createSea() {
+        sea = new Sea();
+        sea.mesh.position.y = -600;
+        scene.add(sea.mesh);
+    }
+
+    function createSky() {
+        sky = new Sky();
+        sky.mesh.position.y = -600;
+        scene.add(sky.mesh);
+    }
+
+    function createPlane() {
+        player = new Airplane(Colors.red, 'player');
+        player.mesh.scale.set(.25, .25, .25);
+        player.mesh.position.y = 100;
+        // 修正旋转：默认机头朝X正向，我们让它朝向屏幕深处(-Z)或侧面？
+        // 这是一个Rail Shooter，我们让飞机看着像是朝前飞（虽然是海在动）
+        // 我们的摄像机在侧后方，所以机头应该朝向屏幕右侧一点，或者正前方
+        // 这里的模型设计是机头在X+，我们旋转它使其背对摄像机（略微）
+        scene.add(player.mesh);
+    }
+
+    function createEnemy() {
+        enemy = new Airplane(Colors.enemy, 'enemy');
+        enemy.mesh.scale.set(.25, .25, .25);
+        enemy.mesh.position.set(200, 100, 0); // 初始位置在前方
+        enemy.mesh.rotation.y = Math.PI; // 掉头，面对玩家
+        scene.add(enemy.mesh);
+    }
+
+    // --- 粒子爆炸效果 ---
+    function spawnParticles(pos, color, count) {
+        for (let i = 0; i < count; i++) {
+            const geom = new THREE.BoxGeometry(4, 4, 4);
+            const mat = new THREE.MeshBasicMaterial({ color: color });
+            const p = new THREE.Mesh(geom, mat);
+            p.position.copy(pos);
+            
+            // 随机散射速度
+            p.userData = {
+                vel: new THREE.Vector3(
+                    (Math.random() - 0.5) * 8,
+                    (Math.random() - 0.5) * 8,
+                    (Math.random() - 0.5) * 8
+                ),
+                scaleSpeed: Math.random() * 0.1 + 0.05
+            };
+            
+            scene.add(p);
+            particles.push(p);
+        }
+    }
+
+    // --- 子弹系统 ---
+    function shootBullet(source, isPlayer) {
+        if(!gameActive) return;
+        
+        const geom = new THREE.BoxGeometry(10, 2, 2);
+        const mat = new THREE.MeshBasicMaterial({ color: isPlayer ? 0xffff00 : 0xff00ff });
+        const b = new THREE.Mesh(geom, mat);
+        
+        // 设置初始位置和方向
+        b.position.copy(source.mesh.position);
+        
+        if (isPlayer) {
+            b.position.x += 15; // 稍微靠前
+            // 简单逻辑：子弹向右飞 (X+)
+            b.userData = { vel: new THREE.Vector3(15, 0, 0), isPlayer: true };
+        } else {
+            b.position.x -= 15;
+            // 敌人子弹：追踪玩家当前位置的方向
+            const dir = new THREE.Vector3().subVectors(player.mesh.position, source.mesh.position).normalize();
+            b.userData = { vel: dir.multiplyScalar(8), isPlayer: false };
+            b.rotation.z = Math.atan2(dir.y, dir.x); // 让子弹旋转指向目标
+        }
+        
+        scene.add(b);
+        bullets.push(b);
+    }
+
+    // --- 游戏逻辑更新 ---
+
+    function updatePlayer() {
+        // 目标位置计算 (将鼠标位置映射到3D空间)
+        const targetX = normalize(mousePos.x, -1, 1, -100, 100); // Z轴深度移动
+        const targetY = normalize(mousePos.y, -1, 1, 25, 175);   // Y轴高度移动
+
+        // 平滑移动 (Lerp)
+        // 注意：在这个视角下，屏幕X对应3D世界Z轴，屏幕Y对应3D世界Y轴
+        // 3D世界X轴是飞行前进方向
+        player.mesh.position.y += (targetY - player.mesh.position.y) * 0.1;
+        player.mesh.position.z = player.mesh.position.z + (targetX - player.mesh.position.z) * 0.1;
+
+        // 姿态模拟：根据移动产生侧倾(Roll)和俯仰(Pitch)
+        const moveDiffY = targetY - player.mesh.position.y;
+        const moveDiffZ = targetX - player.mesh.position.z;
+
+        player.mesh.rotation.x = -moveDiffY * 0.01; // 俯仰
+        player.mesh.rotation.z = moveDiffY * 0.005; // 侧倾微调
+        
+        player.propeller.rotation.x += 0.3;
+    }
+
+    let enemyTime = 0;
+    function updateEnemy() {
+        if(enemy.hp <= 0) return;
+        enemyTime += 0.02;
+
+        // 简单的AI：8字形盘旋 + 追踪Z轴
+        const targetY = 100 + Math.sin(enemyTime) * 60;
+        const targetZ = Math.cos(enemyTime * 0.5) * 100;
+
+        enemy.mesh.position.y += (targetY - enemy.mesh.position.y) * 0.05;
+        enemy.mesh.position.z += (targetZ - enemy.mesh.position.z) * 0.05;
+        
+        // 敌人始终面向左侧（玩家方向），并根据移动稍微倾斜
+        enemy.mesh.rotation.x = Math.sin(enemyTime) * 0.2;
+        enemy.propeller.rotation.x += 0.3;
+
+        // 敌人射击逻辑 (2%概率每帧)
+        if (Math.random() < 0.02) {
+            shootBullet(enemy, false);
+        }
+    }
+
+    function updateBullets() {
+        for (let i = bullets.length - 1; i >= 0; i--) {
+            const b = bullets[i];
+            b.position.add(b.userData.vel);
+
+            // 碰撞检测距离阈值
+            const hitDist = 25;
+            let hit = false;
+
+            if (b.userData.isPlayer && enemy.hp > 0) {
+                if (b.position.distanceTo(enemy.mesh.position) < hitDist) {
+                    enemy.hp -= 10;
+                    spawnParticles(b.position, Colors.red, 5);
+                    score += 50;
+                    hit = true;
+                    // 屏幕震动
+                    camera.position.y += Math.random() * 2 - 1;
+                    if (enemy.hp <= 0) handleWin();
+                }
+            } else if (!b.userData.isPlayer && player.hp > 0) {
+                if (b.position.distanceTo(player.mesh.position) < hitDist) {
+                    player.hp -= 10;
+                    spawnParticles(b.position, Colors.enemy, 5);
+                    hit = true;
+                    camera.position.x += Math.random() * 4 - 2; // 强震动
+                    if (player.hp <= 0) handleGameOver();
+                }
+            }
+
+            // 边界移除或击中移除
+            if (hit || Math.abs(b.position.x) > 500) {
+                scene.remove(b);
+                bullets.splice(i, 1);
+            }
+        }
+    }
+
+    function updateParticles() {
+        for (let i = particles.length - 1; i >= 0; i--) {
+            const p = particles[i];
+            p.position.add(p.userData.vel);
+            p.rotation.x += 0.1;
+            p.scale.multiplyScalar(0.9); // 逐渐缩小
+
+            if (p.scale.x < 0.1) {
+                scene.remove(p);
+                particles.splice(i, 1);
+            }
+        }
+    }
+
+    // --- 辅助与UI ---
+    function normalize(v, vmin, vmax, tmin, tmax) {
+        const nv = Math.max(Math.min(v, vmax), vmin);
+        const dv = vmax - vmin;
+        const pc = (nv - vmin) / dv;
+        return tmin + (pc * (tmax - tmin));
+    }
+
+    function handleMouseMove(event) {
+        // 归一化鼠标坐标 -1 到 1
+        const tx = -1 + (event.clientX / window.innerWidth) * 2;
+        const ty = 1 - (event.clientY / window.innerHeight) * 2;
+        mousePos = { x: tx, y: ty };
+    }
+
+    function handleShoot(event) {
+        if (event.button === 0 && player.hp > 0) { // 左键
+            shootBullet(player, true);
+        }
+    }
+
+    function handleWindowResize() {
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+    }
+
+    function updateUI() {
+        document.getElementById('p-hp').style.width = Math.max(0, player.hp) + '%';
+        document.getElementById('e-hp').style.width = Math.max(0, enemy.hp) + '%';
+        document.getElementById('score').innerText = score;
+    }
+
+    function handleWin() {
+        spawnParticles(enemy.mesh.position, 0xffaa00, 30); // 大爆炸
+        enemy.mesh.visible = false;
+        
+        // 敌人复活逻辑
+        setTimeout(() => {
+            if(gameActive) {
+                enemy.hp = 100 + score / 5; // 难度增加
+                enemy.mesh.position.set(200, 100, 0);
+                enemy.mesh.visible = true;
+            }
+        }, 1500);
+    }
+
+    function handleGameOver() {
+        gameActive = false;
+        spawnParticles(player.mesh.position, Colors.red, 50);
+        player.mesh.visible = false;
+        
+        const go = document.getElementById('game-over');
+        go.classList.add('active');
+        document.getElementById('end-title').innerText = "K.I.A";
+        document.getElementById('end-msg').innerText = "FINAL SCORE: " + score;
+    }
+
+    window.resetGame = function() {
+        player.hp = 100;
+        enemy.hp = 100;
+        score = 0;
+        gameActive = true;
+        player.mesh.visible = true;
+        enemy.mesh.visible = true;
+        enemy.mesh.position.set(200, 100, 0);
+        
+        // 清理子弹
+        bullets.forEach(b => scene.remove(b));
+        bullets = [];
+        
+        document.getElementById('game-over').classList.remove('active');
+        updateUI();
+    };
+
+    // --- 主循环 ---
+    function loop() {
+        requestAnimationFrame(loop);
+        
+        // 环境动画
+        sea.moveWaves();
+        sky.mesh.rotation.z += .01;
+
+        if (gameActive) {
+            updatePlayer();
+            updateEnemy();
+            updateBullets();
+            updateUI();
+            
+            // 摄像机微动，增加动感
+            camera.position.x += (0 - camera.position.x) * 0.05;
+            camera.position.y += (100 - camera.position.y) * 0.05;
+        }
+        
+        updateParticles();
+        renderer.render(scene, camera);
+    }
+
+    // 启动游戏
+    window.addEventListener('load', init, false);
+
+</script>
+</body>
+</html>
